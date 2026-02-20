@@ -1,0 +1,15 @@
+services:
+  planning-poker:
+    hostname: planning-poker
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8093:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped

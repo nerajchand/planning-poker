@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Planning Poker</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/open-iconic/1.1.1/font/css/open-iconic-bootstrap.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+      :root {
+          --primary-color: #008fe2;
+          --primary-hover: #0073b5;
+          --secondary-color: #ff9769;
+          --background-color: #111827;
+          --card-background: #1f2937;
+          --text-color: #f3f4f6;
+          --text-muted: #9ca3af;
+          --border-color: #374151;
+          --success-color: #10b981;
+          --error-color: #ef4444;
+      }
+
+      body {
+          background-color: var(--background-color);
+          color: var(--text-color);
+          font-family: 'Inter', system-ui, -apple-system, sans-serif;
+          min-height: 100vh;
+      }
+
+      .navbar {
+          background-color: var(--background-color);
+          border-bottom: 1px solid var(--border-color);
+          padding: 0.75rem 1rem;
+          margin-bottom: 2rem;
+      }
+
+      .card {
+          background-color: var(--card-background);
+          border: 1px solid var(--border-color);
+          border-radius: 0.75rem;
+          color: var(--text-color);
+          margin-bottom: 1.5rem;
+          box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+      }
+
+      .btn-primary {
+          background-color: var(--primary-color);
+          border-color: var(--primary-color);
+      }
+
+      .btn-primary:hover {
+          background-color: var(--primary-hover);
+          border-color: var(--primary-hover);
+      }
+
+      .poker_card {
+          background-color: var(--card-background) !important;
+          border: 1px solid var(--border-color) !important;
+          color: var(--text-color) !important;
+          width: 60px;
+          height: 90px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          font-size: 1.25rem;
+          font-weight: 700;
+          margin: 5px;
+          transition: all 0.2s;
+      }
+
+      .poker_card:hover:not(:disabled) {
+          border-color: var(--primary-color) !important;
+          transform: translateY(-2px);
+      }
+
+      .poker_card.selected {
+          background-color: rgba(16, 185, 129, 0.2) !important;
+          border-color: var(--success-color) !important;
+          color: var(--success-color) !important;
+      }
+
+      .table { color: var(--text-color); }
+      .table-striped tbody tr:nth-of-type(odd) { background-color: rgba(255, 255, 255, 0.03); }
+      .table-success, .table-success > td { background-color: rgba(16, 185, 129, 0.1) !important; color: var(--success-color) !important; }
+      
+      .asleep { opacity: 0.4; }
+      .text-muted { color: var(--text-muted) !important; }
+      
+      .notifications {
+          position: fixed;
+          right: 1.5rem;
+          bottom: 1.5rem;
+          z-index: 1000;
+          display: flex;
+          flex-direction: column;
+          gap: 0.5rem;
+      }
+
+      .notification {
+          background-color: var(--card-background);
+          border: 1px solid var(--border-color);
+          padding: 0.5rem 1rem;
+          border-radius: 0.5rem;
+          font-size: 0.875rem;
+          animation: slideIn 0.3s ease-out;
+      }
+
+      /* iMessage Style Chat */
+      .chat-bubble {
+          max-width: 80%;
+          padding: 8px 12px;
+          border-radius: 18px;
+          margin-bottom: 8px;
+          position: relative;
+          word-wrap: break-word;
+          font-size: 0.9rem;
+      }
+
+      .chat-bubble.mine {
+          background-color: var(--primary-color);
+          color: white;
+          align-self: flex-end;
+          border-bottom-right-radius: 4px;
+      }
+
+      .chat-bubble.theirs {
+          background-color: #e9e9eb;
+          color: black;
+          align-self: flex-start;
+          border-bottom-left-radius: 4px;
+      }
+
+      .chat-user-label {
+          font-size: 0.7rem;
+          color: var(--text-muted);
+          margin-bottom: 2px;
+          margin-left: 8px;
+      }
+
+      .mine .chat-user-label {
+          text-align: right;
+          margin-right: 8px;
+          margin-left: 0;
+      }
+
+      @keyframes slideIn {
+          from { opacity: 0; transform: translateX(20px); }
+          to { opacity: 1; transform: translateX(0); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

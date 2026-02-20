@@ -1,0 +1,114 @@
+name: Release
+
+on:
+    push:
+        branches:
+            - main
+
+jobs:
+    release:
+        if: |
+            github.event.head_commit.message == null || (
+              !contains(github.event.head_commit.message, '[skip ci]') &&
+              !contains(github.event.head_commit.message, '[ci skip]') &&
+              !contains(github.event.head_commit.message, '[no ci]') &&
+              !contains(github.event.head_commit.message, '[skip actions]')
+            )
+        permissions:
+            contents: write
+            packages: write
+        runs-on: ubuntu-latest
+        env:
+            REGISTRY: ghcr.io
+            IMAGE_NAME: ${{ github.repository }}
+
+        steps:
+            - name: Set lowercase image name
+              id: vars
+              run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+
+            - name: Checkout Repository
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: '1.23'
+
+            - name: Set up Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+
+            - name: Install Root Dependencies
+              run: npm install
+
+            - name: Install UI Dependencies
+              run: cd ui && npm install
+
+            - name: Build UI
+              run: cd ui && npm run build
+
+            - name: Build Backend
+              run: go build -v ./cmd/server/main.go
+
+            - name: Run Semantic Release and get version
+              id: semantic
+              env:
+                  GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+              run: |
+                  npx semantic-release --dry-run
+                  VERSION=$(npx semantic-release --dry-run | grep -oE 'Published release ([0-9]+\.[0-9]+\.[0-9]+)' | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
+                  if [ -z "$VERSION" ]; then
+                    echo "No new version to release"
+                    echo "version=0.0.0" >> $GITHUB_OUTPUT
+                    echo "major=0" >> $GITHUB_OUTPUT
+                    echo "minor=0.0" >> $GITHUB_OUTPUT
+                    echo "skip=true" >> $GITHUB_OUTPUT
+                  else
+                    echo "version=$VERSION" >> $GITHUB_OUTPUT
+                    MAJOR=$(echo "$VERSION" | cut -d. -f1)
+                    MINOR=$(echo "$VERSION" | cut -d. -f1,2)
+                    echo "major=$MAJOR" >> $GITHUB_OUTPUT
+                    echo "minor=$MINOR" >> $GITHUB_OUTPUT
+                    echo "skip=false" >> $GITHUB_OUTPUT
+                    npx semantic-release
+                  fi
+
+            - name: Set up Docker Buildx
+              if: steps.semantic.outputs.skip != 'true'
+              uses: docker/setup-buildx-action@v3
+
+            - name: Log in to GitHub Container Registry
+              if: steps.semantic.outputs.skip != 'true'
+              uses: docker/login-action@v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+
+            - name: Get Git SHA
+              if: steps.semantic.outputs.skip != 'true'
+              id: git-sha
+              run: echo "sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+
+            - name: Build and push multi-arch Docker image
+              if: steps.semantic.outputs.skip != 'true'
+              uses: docker/build-push-action@v5
+              with:
+                  context: .
+                  file: ./Dockerfile
+                  platforms: linux/amd64,linux/arm64
+                  push: true
+                  tags: |
+                      ${{ steps.vars.outputs.image }}:${{ steps.semantic.outputs.version }}
+                      ${{ steps.vars.outputs.image }}:${{ steps.semantic.outputs.minor }}
+                      ${{ steps.vars.outputs.image }}:${{ steps.semantic.outputs.major }}
+                      ${{ steps.vars.outputs.image }}:latest
+                  build-args: |
+                      GIT_SHA=${{ steps.git-sha.outputs.sha }}
+                      GIT_TAG=v${{ steps.semantic.outputs.version }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
