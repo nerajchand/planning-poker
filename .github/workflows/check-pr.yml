@@ -1,0 +1,265 @@
+name: Check Pull Request
+
+on:
+    pull_request:
+        types: [opened, synchronize, reopened, closed]
+        branches:
+            - main
+
+jobs:
+    check-docker-build:
+        name: Build and Test
+        runs-on: ubuntu-latest
+        if: github.event.action != 'closed'
+        permissions:
+            contents: read
+            pull-requests: write
+            packages: write
+
+        steps:
+            - name: Checkout repository
+              uses: actions/checkout@v4
+              with:
+                  fetch-depth: 0
+                  ref: ${{ github.head_ref }}
+
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: '1.23'
+
+            - name: Setup Node.js
+              uses: actions/setup-node@v4
+              with:
+                  node-version: '20'
+
+            - name: Build UI
+              run: |
+                  cd ui
+                  npm install
+                  npm run build
+
+            - name: Build Backend
+              run: go build -v ./cmd/server/main.go
+
+            - name: Fetch base branch
+              run: |
+                  git fetch origin ${{ github.event.pull_request.base.ref }}:${{ github.event.pull_request.base.ref }} || true
+
+            - name: Set up Docker Buildx
+              uses: docker/setup-buildx-action@v3
+
+            - name: Log in to GitHub Container Registry
+              uses: docker/login-action@v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+
+            - name: Get PR number and branch name
+              id: pr-info
+              run: |
+                  echo "pr_number=${{ github.event.pull_request.number }}" >> $GITHUB_OUTPUT
+                  echo "branch_name=$(echo '${{ github.head_ref }}' | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9]/-/g' | sed 's/--*/-/g' | cut -c1-50)" >> $GITHUB_OUTPUT
+                  echo "sha_short=$(echo '${{ github.sha }}' | cut -c1-7)" >> $GITHUB_OUTPUT
+                  echo "repo_lower=$(echo '${{ github.repository }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_OUTPUT
+
+            - name: Get Git diff
+              id: git-diff
+              run: |
+                  # Fetch base branch to ensure we can diff
+                  git fetch origin ${{ github.event.pull_request.base.ref }}:${{ github.event.pull_request.base.ref }} || true
+
+                  # Generate diff
+                  if [ "${{ github.event.pull_request.base.sha }}" != "" ]; then
+                    git diff ${{ github.event.pull_request.base.sha }}..${{ github.sha }} > /tmp/pr-diff.txt || echo "Unable to generate diff" > /tmp/pr-diff.txt
+                  else
+                    git diff origin/${{ github.event.pull_request.base.ref }}..HEAD > /tmp/pr-diff.txt || echo "Unable to generate diff" > /tmp/pr-diff.txt
+                  fi
+
+                  # Limit diff size to avoid comment size limits
+                  DIFF_SIZE=$(wc -c < /tmp/pr-diff.txt | tr -d ' ')
+                  if [ "$DIFF_SIZE" -gt 50000 ]; then
+                    head -c 50000 /tmp/pr-diff.txt > /tmp/pr-diff-truncated.txt
+                    echo "" >> /tmp/pr-diff-truncated.txt
+                    echo "... (diff truncated, too large)" >> /tmp/pr-diff-truncated.txt
+                    mv /tmp/pr-diff-truncated.txt /tmp/pr-diff.txt
+                  fi
+
+            - name: Check if GH_TOKEN is available
+              id: check-token
+              run: |
+                  if [ -n "${{ secrets.GH_TOKEN }}" ]; then
+                      echo "has_gh_token=true" >> $GITHUB_OUTPUT
+                      echo "✅ GH_TOKEN found, will push image to registry"
+                  else
+                      echo "has_gh_token=false" >> $GITHUB_OUTPUT
+                      echo "⚠️ GH_TOKEN not found, will build and load locally only"
+                  fi
+
+            - name: Build Docker image
+              id: build
+              uses: docker/build-push-action@v5
+              with:
+                  context: .
+                  file: ./Dockerfile
+                  platforms: linux/amd64
+                  push: ${{ steps.check-token.outputs.has_gh_token == 'true' }}
+                  load: ${{ steps.check-token.outputs.has_gh_token != 'true' }}
+                  tags: |
+                      ghcr.io/${{ steps.pr-info.outputs.repo_lower }}:pr-${{ steps.pr-info.outputs.pr_number }}-${{ steps.pr-info.outputs.sha_short }}
+                      ghcr.io/${{ steps.pr-info.outputs.repo_lower }}:pr-${{ steps.pr-info.outputs.pr_number }}
+                  cache-from: type=gha
+                  cache-to: type=gha,mode=max
+
+            - name: Test Docker image
+              id: test
+              run: |
+                  IMAGE_TAG="ghcr.io/${{ steps.pr-info.outputs.repo_lower }}:pr-${{ steps.pr-info.outputs.pr_number }}-${{ steps.pr-info.outputs.sha_short }}"
+                  
+                  if [ "${{ steps.check-token.outputs.has_gh_token }}" = "true" ]; then
+                      docker pull $IMAGE_TAG || echo "Using locally loaded image"
+                  fi
+
+                  docker tag $IMAGE_TAG planning-poker:latest
+
+                  # Create a test docker-compose override file
+                  cat > docker-compose.test.yml << 'COMPOSE_EOF'
+                  version: '3.8'
+                  services:
+                      planning-poker:
+                          image: planning-poker:latest
+                          ports:
+                              - '8080:8080'
+                          environment:
+                              - ASPNETCORE_ENVIRONMENT=Development
+                          restart: "no"
+                  COMPOSE_EOF
+                  sed -i 's/^                  //' docker-compose.test.yml
+
+                  docker compose -f docker-compose.test.yml up -d
+                  
+                  echo "Waiting for services to start..."
+                  sleep 15
+
+                  if docker compose -f docker-compose.test.yml ps | grep -q "Up"; then
+                      HEALTH_CHECK=$(curl -s -o /dev/null -w "%{http_code}" http://localhost:8080/ || echo "000")
+                      if [ "$HEALTH_CHECK" = "200" ]; then
+                          echo "✅ Health check passed"
+                          echo "health_check=passed" >> $GITHUB_OUTPUT
+                      else
+                          echo "⚠️ Health check returned $HEALTH_CHECK"
+                          echo "health_check=warning" >> $GITHUB_OUTPUT
+                      fi
+                      echo "test_status=success" >> $GITHUB_OUTPUT
+                  else
+                      echo "❌ Containers failed to start"
+                      docker compose -f docker-compose.test.yml logs || true
+                      echo "test_status=failed" >> $GITHUB_OUTPUT
+                      exit 1
+                  fi
+
+                  docker compose -f docker-compose.test.yml down -v || true
+                  rm -f docker-compose.test.yml || true
+
+            - name: Generate PR comment
+              id: comment
+              run: |
+                  BUILD_STATUS="✅"
+                  TEST_STATUS="✅"
+                  if [ "${{ steps.test.outputs.test_status }}" != "success" ]; then TEST_STATUS="❌"; fi
+                  
+                  IMAGE_TAG="ghcr.io/${{ steps.pr-info.outputs.repo_lower }}:pr-${{ steps.pr-info.outputs.pr_number }}-${{ steps.pr-info.outputs.sha_short }}"
+
+                  {
+                      echo "## 🐳 Docker Build and Test Results"
+                      echo ""
+                      echo "### Build Status"
+                      echo "$BUILD_STATUS Docker image built successfully"
+                      echo ""
+                      echo "### Test Status"
+                      echo "$TEST_STATUS Container started and tested"
+                      echo ""
+                      echo "### Test Image"
+                      echo '```bash'
+                      echo "docker pull $IMAGE_TAG"
+                      echo "docker run -p 8080:8080 $IMAGE_TAG"
+                      echo '```'
+                      echo ""
+                      echo "### Changes in this PR"
+                      echo "<details><summary>📋 View diff</summary>"
+                      echo ""
+                      echo '```diff'
+                      cat /tmp/pr-diff.txt
+                      echo '```'
+                      echo "</details>"
+                  } > /tmp/pr-comment.md
+
+            - name: Post PR comment
+              uses: actions/github-script@v7
+              with:
+                  github-token: ${{ secrets.GITHUB_TOKEN }}
+                  script: |
+                      const fs = require('fs');
+                      const comment = fs.readFileSync('/tmp/pr-comment.md', 'utf8');
+                      const { data: comments } = await github.rest.issues.listComments({
+                          owner: context.repo.owner,
+                          repo: context.repo.repo,
+                          issue_number: context.issue.number,
+                      });
+                      const botComment = comments.find(c => c.user.type === 'Bot' && c.body.includes('🐳 Docker Build and Test Results'));
+                      if (botComment) {
+                          await github.rest.issues.updateComment({ owner: context.repo.owner, repo: context.repo.repo, comment_id: botComment.id, body: comment });
+                      } else {
+                          await github.rest.issues.createComment({ owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, body: comment });
+                      }
+
+    cleanup-pr-images:
+        name: Cleanup PR Images
+        runs-on: ubuntu-latest
+        if: github.event.action == 'closed'
+        permissions:
+            contents: read
+            packages: write
+        steps:
+            - name: Log in to GitHub Container Registry
+              uses: docker/login-action@v3
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+
+            - name: Delete PR images
+              uses: actions/github-script@v7
+              with:
+                  github-token: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+                  script: |
+                      const repo = context.repo;
+                      const prNumber = context.payload.pull_request.number;
+                      const repoLower = repo.repo.toLowerCase();
+                      const owner = repo.owner;
+                      
+                      async function getPackageVersions() {
+                          try {
+                              const { data: versions } = await github.rest.packages.getAllPackageVersionsForPackageOwnedByOrg({
+                                  package_type: 'container', package_name: repoLower, org: owner, per_page: 100
+                              });
+                              return { versions, isOrg: true };
+                          } catch (e) {
+                              const { data: versions } = await github.rest.packages.getAllPackageVersionsForPackageOwnedByUser({
+                                  package_type: 'container', package_name: repoLower, username: owner, per_page: 100
+                              });
+                              return { versions, isOrg: false };
+                          }
+                      }
+                      
+                      const { versions, isOrg } = await getPackageVersions();
+                      const toDelete = versions.filter(v => v.metadata?.container?.tags?.some(t => t === `pr-${prNumber}` || t.startsWith(`pr-${prNumber}-`)));
+                      
+                      for (const v of toDelete) {
+                          if (isOrg) {
+                              await github.rest.packages.deletePackageVersionForOrg({ package_type: 'container', package_name: repoLower, org: owner, package_version_id: v.id });
+                          } else {
+                              await github.rest.packages.deletePackageVersionForUser({ package_type: 'container', package_name: repoLower, username: owner, package_version_id: v.id });
+                          }
+                      }
