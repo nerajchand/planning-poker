@@ -530,6 +530,19 @@ function App() {
             </div>
           </div>
         )}
+
+        <footer className="footer mt-auto">
+          <div className="container text-center">
+            <span className="text-muted">
+              <a href="https://github.com/nerajchand/planning-poker" target="_blank" rel="noopener noreferrer">
+                GitHub Repo
+              </a> • 
+              <a href="https://github.com/nerajchand/planning-poker/issues/new" target="_blank" rel="noopener noreferrer" className="ml-1">
+                Report an Issue
+              </a>
+            </span>
+          </div>
+        </footer>
       </div>
 
       <div className="notifications">
