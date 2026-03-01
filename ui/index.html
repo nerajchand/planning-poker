@@ -108,6 +108,23 @@
       }
 
       /* iMessage Style Chat */
+      .chat-panel {
+          height: 60vh !important;
+          height: 60dvh !important;
+          display: flex !important;
+          flex-direction: column !important;
+          overflow: hidden !important;
+      }
+
+      @media (min-width: 992px) {
+          .chat-panel {
+              height: calc(100vh - 160px) !important;
+              height: calc(100dvh - 160px) !important;
+              position: sticky !important;
+              top: 1.5rem;
+          }
+      }
+
       .chat-bubble {
           max-width: 80%;
           padding: 8px 12px;

@@ -81,8 +81,13 @@ func (e *Engine) JoinRoom(id uuid.UUID, recoveryId uuid.UUID, playerName string,
 			delete(server.Players, p.Id) // Remove old mapping if private ID changed
 			p.Id = privateId
 			p.Mode = models.Awake
-			p.Name = playerName
-			p.Type = pType
+			// Only update name/type if they were provided and not empty
+			if playerName != "" {
+				p.Name = playerName
+			}
+			if pType != "" {
+				p.Type = pType
+			}
 			server.Players[privateId] = p
 			return p, nil
 		}
@@ -134,6 +139,7 @@ func (e *Engine) Vote(serverId uuid.UUID, privateId string, vote string) error {
 		return errors.New("cannot change vote once revealed")
 	}
 
+	player.Mode = models.Awake // If they vote, they are awake
 	server.CurrentSession.Votes[fmt.Sprintf("%d", player.PublicId)] = vote
 	return nil
 }
@@ -156,6 +162,7 @@ func (e *Engine) UnVote(serverId uuid.UUID, privateId string) error {
 		return errors.New("player not found")
 	}
 
+	player.Mode = models.Awake
 	delete(server.CurrentSession.Votes, fmt.Sprintf("%d", player.PublicId))
 	return nil
 }
@@ -205,6 +212,24 @@ func (e *Engine) KickPlayer(serverId uuid.UUID, kickedPublicId int) (string, err
 	}
 
 	return "", errors.New("player not found")
+}
+
+func (e *Engine) DisconnectPlayer(serverId uuid.UUID, privateId string) (string, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	server, ok := e.servers[serverId]
+	if !ok {
+		return "", false
+	}
+
+	player, ok := server.Players[privateId]
+	if !ok {
+		return "", false
+	}
+
+	player.Mode = models.Asleep
+	return player.Name, true
 }
 
 func (e *Engine) LeaveRoom(serverId uuid.UUID, privateId string) (string, bool) {
