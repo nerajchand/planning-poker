@@ -135,10 +135,9 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 func (c *Client) readPump(s *Server) {
 	defer func() {
 		if c.PlayerId != "" {
-			if name, ok := s.Engine.LeaveRoom(c.RoomId, c.PlayerId); ok {
-				log.Printf("Player %s left room %s (connection closed)", name, c.RoomId)
+			if name, ok := s.Engine.DisconnectPlayer(c.RoomId, c.PlayerId); ok {
+				log.Printf("Player %s disconnected from room %s", name, c.RoomId)
 				s.broadcastUpdate(c.RoomId)
-				s.broadcastLog(c.RoomId, name, "Left the room")
 			}
 		}
 		c.Hub.Unregister <- c
@@ -295,6 +294,15 @@ func (s *Server) handleAction(c *Client, action string, payload json.RawMessage)
 			return
 		}
 		s.broadcastChat(c.RoomId, playerName, p.Message)
+	case "leave":
+		if c.PlayerId != "" {
+			if name, ok := s.Engine.LeaveRoom(c.RoomId, c.PlayerId); ok {
+				log.Printf("Player %s explicitly left room %s", name, c.RoomId)
+				s.broadcastUpdate(c.RoomId)
+				s.broadcastLog(c.RoomId, name, "Left the room")
+				c.PlayerId = "" // Prevent readPump from marking as disconnected
+			}
+		}
 	}
 }
 
