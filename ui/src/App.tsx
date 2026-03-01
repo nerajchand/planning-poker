@@ -41,7 +41,8 @@ function App() {
   });
   
   const [server, setServer] = useState<PokerServer | null>(null);
-  const [playerName, setPlayerName] = useState('');
+  const [playerName, setPlayerName] = useState(() => localStorage.getItem('playerName') || '');
+  const [rememberName, setRememberName] = useState(() => !!localStorage.getItem('playerName'));
   const [playerType, setPlayerType] = useState<PlayerType>('Participant');
   const [currentPlayer, setCurrentPlayer] = useState<Player | null>(null);
   const [isInitializing, setIsInitializing] = useState(true);
@@ -53,8 +54,12 @@ function App() {
   const [chosenCard, setChosenCard] = useState<string | null>(null);
   
   const socketRef = useRef<WebSocket | null>(null);
-  const recoveryId = useRef(uuidv4());
+  const recoveryId = useRef<string>(localStorage.getItem('recoveryId') || uuidv4());
   const chatEndRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    localStorage.setItem('recoveryId', recoveryId.current);
+  }, []);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -93,6 +98,19 @@ function App() {
     ws.onopen = () => {
       addNotification('Connected to server', 'success');
       setIsInitializing(false);
+      
+      // Auto-join if we have a player name
+      const storedName = localStorage.getItem('playerName');
+      if (storedName) {
+        ws.send(JSON.stringify({
+          action: 'join',
+          payload: { 
+            name: storedName, 
+            recoveryId: recoveryId.current, 
+            type: playerType 
+          }
+        }));
+      }
     };
 
     ws.onmessage = (event) => {
@@ -103,11 +121,6 @@ function App() {
           break;
         case 'updated':
           setServer(msg.payload);
-          if (recoveryId.current && !currentPlayer) {
-             const players = Object.values(msg.payload.players as Record<string, Player>);
-             const me = players.find(p => p.name === playerName); 
-             if (me) setCurrentPlayer(me);
-          }
           if (msg.payload && currentPlayer) {
             const myVote = msg.payload.currentSession.votes[currentPlayer.publicId.toString()];
             if (myVote && !chosenCard) {
@@ -137,7 +150,9 @@ function App() {
 
     ws.onclose = () => {
       addNotification('Disconnected. Retrying...', 'danger');
-      setTimeout(connect, 3000);
+      setTimeout(() => {
+        if (roomId) connect();
+      }, 3000);
     };
 
     socketRef.current = ws;
@@ -155,10 +170,26 @@ function App() {
   };
 
   const join = () => {
+    if (rememberName) {
+      localStorage.setItem('playerName', playerName);
+    } else {
+      localStorage.removeItem('playerName');
+    }
     socketRef.current?.send(JSON.stringify({
       action: 'join',
-      payload: { name: playerName, recoveryId: recoveryId.current, type: playerType }
+      payload: { 
+        name: playerName, 
+        recoveryId: recoveryId.current, 
+        type: playerType 
+      }
     }));
+  };
+
+  const leave = () => {
+    socketRef.current?.send(JSON.stringify({ action: 'leave' }));
+    setCurrentPlayer(null);
+    setRoomId(null);
+    window.history.pushState({}, '', '/');
   };
 
   const vote = (card: string) => {
@@ -220,11 +251,27 @@ function App() {
              <i className="material-icons mr-2 text-primary" style={{verticalAlign: 'middle'}}>style</i>
              Planning Poker
           </a>
-          {roomId && currentPlayer && (
-            <button className="btn btn-outline-info btn-sm ml-auto" onClick={copyUrl}>
-              <span className="oi oi-share mr-1"></span> Share Room
-            </button>
-          )}
+          <div className="ml-auto d-flex align-items-center">
+            {playerName && (
+              <button className="btn btn-link text-muted btn-sm mr-3 p-0" onClick={() => {
+                setPlayerName('');
+                localStorage.removeItem('playerName');
+                setCurrentPlayer(null);
+              }}>
+                <span className="oi oi-person mr-1"></span> {playerName} (Change)
+              </button>
+            )}
+            {roomId && currentPlayer && (
+              <>
+                <button className="btn btn-outline-info btn-sm mr-2" onClick={copyUrl}>
+                  <span className="oi oi-share mr-1"></span> Share
+                </button>
+                <button className="btn btn-outline-danger btn-sm" onClick={leave}>
+                  <span className="oi oi-account-logout mr-1"></span> Exit Room
+                </button>
+              </>
+            )}
+          </div>
         </div>
       </nav>
 
@@ -253,6 +300,10 @@ function App() {
                 <div className="form-group">
                   <label>Username</label>
                   <input className="form-control" maxLength={20} value={playerName} onChange={e => setPlayerName(e.target.value)} />
+                </div>
+                <div className="custom-control custom-checkbox mb-3">
+                  <input type="checkbox" className="custom-control-input" id="rememberName" checked={rememberName} onChange={e => setRememberName(e.target.checked)} />
+                  <label className="custom-control-label text-muted" htmlFor="rememberName" style={{fontSize: '0.9rem'}}>Remember me on this device</label>
                 </div>
                 <div className="form-group">
                   <label>Participation type</label>
@@ -443,11 +494,11 @@ function App() {
 
             {/* Right Column: Chat */}
             <div className="col-lg-4">
-              <div className="card shadow-sm d-flex flex-column" style={{height: '800px'}}>
+              <div className="card shadow-sm d-flex flex-column chat-panel">
                 <div className="card-header bg-transparent border-bottom">
                   <h6 className="mb-0 font-weight-bold">Chat</h6>
                 </div>
-                <div className="card-body d-flex flex-column overflow-auto p-3" style={{background: 'rgba(0,0,0,0.02)'}}>
+                <div className="card-body d-flex flex-column overflow-auto p-3 flex-grow-1" style={{background: 'rgba(0,0,0,0.02)', minHeight: 0, flex: '1 1 0'}}>
                   {chats.map((c, i) => (
                     <div key={i} className={`d-flex flex-column ${c.user === playerName ? 'align-items-end mine' : 'align-items-start'}`}>
                       <div className="chat-user-label">{c.user} • {new Date(c.timestamp).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}</div>
