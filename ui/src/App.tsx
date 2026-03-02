@@ -148,8 +148,15 @@ function App() {
       }
     };
 
+    ws.onerror = (error) => {
+      console.error('WebSocket Error:', error);
+      addNotification('Connection error occurred', 'danger');
+      setIsInitializing(false); // Stop the spinner so notifications can be seen
+    };
+
     ws.onclose = () => {
       addNotification('Disconnected. Retrying...', 'danger');
+      setIsInitializing(false); // Stop the spinner if it's still there
       setTimeout(() => {
         if (roomId) connect();
       }, 3000);
@@ -234,15 +241,6 @@ function App() {
     return { avg, modes };
   }, [server]);
 
-  if (isInitializing && roomId) {
-    return (
-      <div className="min-h-screen d-flex align-items-center justify-content-center flex-column">
-        <div className="spinner-border text-primary mb-3" role="status"></div>
-        <div className="h5 text-uppercase tracking-wider">Initializing session...</div>
-      </div>
-    );
-  }
-
   return (
     <>
       <nav className="navbar navbar-expand-lg">
@@ -276,7 +274,12 @@ function App() {
       </nav>
 
       <div className="container-fluid px-4 pb-5">
-        {!roomId ? (
+        {isInitializing && roomId ? (
+          <div className="min-h-screen d-flex align-items-center justify-content-center flex-column" style={{marginTop: '-100px'}}>
+            <div className="spinner-border text-primary mb-3" role="status"></div>
+            <div className="h5 text-uppercase tracking-wider">Initializing session...</div>
+          </div>
+        ) : !roomId ? (
           <div className="container">
             <div className="card shadow-lg mt-5 border-0">
               <div className="card-body p-5">

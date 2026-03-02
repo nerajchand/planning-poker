@@ -131,6 +131,8 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	slog.Info("WebSocket connection established", "roomId", roomId, "remoteAddr", r.RemoteAddr)
+
 	client := &Client{Hub: s.Hub, Conn: conn, Send: make(chan []byte, 256), RoomId: roomId}
 	s.Hub.Register <- client
 
