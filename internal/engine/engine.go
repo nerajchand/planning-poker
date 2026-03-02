@@ -3,11 +3,13 @@ package engine
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"planning-poker-go/internal/metrics"
 	"planning-poker-go/internal/models"
 
 	"github.com/google/uuid"
@@ -35,6 +37,7 @@ func (e *Engine) CreateRoom(desiredCardSet string) (uuid.UUID, error) {
 	}
 
 	if len(cleanedCards) == 0 {
+		slog.Warn("Attempted to create room with empty card set")
 		return uuid.Nil, errors.New("card set cannot be empty")
 	}
 
@@ -51,6 +54,10 @@ func (e *Engine) CreateRoom(desiredCardSet string) (uuid.UUID, error) {
 		},
 		LastAccess: time.Now(),
 	}
+
+	metrics.RoomsCreatedTotal.Inc()
+	metrics.ActiveRooms.Set(float64(len(e.servers)))
+	slog.Info("Room created", "roomId", id, "cardSet", desiredCardSet)
 
 	return id, nil
 }
@@ -71,6 +78,7 @@ func (e *Engine) JoinRoom(id uuid.UUID, recoveryId uuid.UUID, playerName string,
 
 	server, ok := e.servers[id]
 	if !ok {
+		slog.Warn("Player tried to join non-existent room", "roomId", id)
 		return nil, errors.New("room not found")
 	}
 
@@ -89,6 +97,7 @@ func (e *Engine) JoinRoom(id uuid.UUID, recoveryId uuid.UUID, playerName string,
 				p.Type = pType
 			}
 			server.Players[privateId] = p
+			slog.Info("Player recovered session", "roomId", id, "playerName", p.Name, "type", p.Type)
 			return p, nil
 		}
 	}
@@ -114,6 +123,11 @@ func (e *Engine) JoinRoom(id uuid.UUID, recoveryId uuid.UUID, playerName string,
 	}
 
 	server.Players[privateId] = player
+	
+	metrics.ActivePlayers.Inc()
+	metrics.PlayersPerRoom.Observe(float64(len(server.Players)))
+	slog.Info("Player joined room", "roomId", id, "playerName", playerName, "type", pType, "totalPlayers", len(server.Players))
+	
 	return player, nil
 }
 
@@ -141,6 +155,9 @@ func (e *Engine) Vote(serverId uuid.UUID, privateId string, vote string) error {
 
 	player.Mode = models.Awake // If they vote, they are awake
 	server.CurrentSession.Votes[fmt.Sprintf("%d", player.PublicId)] = vote
+	
+	metrics.PlayerActionsTotal.WithLabelValues("vote").Inc()
+	
 	return nil
 }
 
@@ -164,6 +181,9 @@ func (e *Engine) UnVote(serverId uuid.UUID, privateId string) error {
 
 	player.Mode = models.Awake
 	delete(server.CurrentSession.Votes, fmt.Sprintf("%d", player.PublicId))
+	
+	metrics.PlayerActionsTotal.WithLabelValues("unvote").Inc()
+	
 	return nil
 }
 
@@ -178,6 +198,9 @@ func (e *Engine) ClearVotes(serverId uuid.UUID) error {
 
 	server.CurrentSession.Votes = make(map[string]string)
 	server.CurrentSession.IsShown = false
+	
+	metrics.PlayerActionsTotal.WithLabelValues("clear").Inc()
+	
 	return nil
 }
 
@@ -191,6 +214,9 @@ func (e *Engine) ShowVotes(serverId uuid.UUID) error {
 	}
 
 	server.CurrentSession.IsShown = true
+	
+	metrics.PlayerActionsTotal.WithLabelValues("show").Inc()
+	
 	return nil
 }
 
@@ -207,6 +233,10 @@ func (e *Engine) KickPlayer(serverId uuid.UUID, kickedPublicId int) (string, err
 		if p.PublicId == kickedPublicId {
 			delete(server.Players, id)
 			delete(server.CurrentSession.Votes, fmt.Sprintf("%d", p.PublicId))
+			
+			metrics.ActivePlayers.Dec()
+			slog.Info("Player kicked", "roomId", serverId, "publicId", kickedPublicId, "playerName", p.Name)
+			
 			return id, nil
 		}
 	}
@@ -229,6 +259,7 @@ func (e *Engine) DisconnectPlayer(serverId uuid.UUID, privateId string) (string,
 	}
 
 	player.Mode = models.Asleep
+	slog.Info("Player marked asleep", "roomId", serverId, "playerName", player.Name)
 	return player.Name, true
 }
 
@@ -249,6 +280,9 @@ func (e *Engine) LeaveRoom(serverId uuid.UUID, privateId string) (string, bool) 
 	name := player.Name
 	delete(server.Players, privateId)
 	delete(server.CurrentSession.Votes, fmt.Sprintf("%d", player.PublicId))
+	
+	metrics.ActivePlayers.Dec()
+	slog.Info("Player left room", "roomId", serverId, "playerName", name)
 
 	return name, true
 }
@@ -258,9 +292,19 @@ func (e *Engine) CleanupOldRooms(maxAge time.Duration) {
 	defer e.mu.Unlock()
 
 	now := time.Now()
+	cleaned := 0
+	playersRemoved := 0
 	for id, s := range e.servers {
 		if now.Sub(s.LastAccess) > maxAge {
+			playersRemoved += len(s.Players)
 			delete(e.servers, id)
+			cleaned++
 		}
+	}
+	
+	if cleaned > 0 {
+		metrics.ActiveRooms.Set(float64(len(e.servers)))
+		metrics.ActivePlayers.Sub(float64(playersRemoved))
+		slog.Info("Cleaned up old rooms", "roomsRemoved", cleaned, "playersRemoved", playersRemoved, "activeRooms", len(e.servers))
 	}
 }

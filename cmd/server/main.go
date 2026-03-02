@@ -1,7 +1,7 @@
 package main
 
 import (
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -9,9 +9,15 @@ import (
 
 	"planning-poker-go/internal/engine"
 	"planning-poker-go/internal/server"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
 func main() {
+	// Setup structured logging
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
 	pokerEngine := engine.NewEngine()
 	hub := server.NewHub()
 	go hub.Run()
@@ -32,6 +38,7 @@ func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/create", srv.HandleCreateRoom)
 	mux.HandleFunc("/ws", srv.HandleWS)
+	mux.Handle("/metrics", promhttp.Handler())
 
 	// Serve static files from UI with SPA fallback
 	uiPath := "./ui/dist"
@@ -50,8 +57,9 @@ func main() {
 		port = "8080"
 	}
 
-	log.Printf("Server starting on :%s", port)
+	slog.Info("Server starting", "port", port)
 	if err := http.ListenAndServe(":"+port, mux); err != nil {
-		log.Fatal(err)
+		slog.Error("Server failed", "error", err)
+		os.Exit(1)
 	}
 }

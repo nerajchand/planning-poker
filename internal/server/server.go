@@ -2,12 +2,13 @@ package server
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
 
 	"planning-poker-go/internal/engine"
+	"planning-poker-go/internal/metrics"
 	"planning-poker-go/internal/models"
 
 	"github.com/google/uuid"
@@ -62,6 +63,7 @@ func (h *Hub) Run() {
 			}
 			h.Rooms[client.RoomId][client] = true
 			h.Mu.Unlock()
+			metrics.WSConnectionsActive.Inc()
 		case client := <-h.Unregister:
 			h.Mu.Lock()
 			if _, ok := h.Rooms[client.RoomId]; ok {
@@ -72,6 +74,7 @@ func (h *Hub) Run() {
 				}
 			}
 			h.Mu.Unlock()
+			metrics.WSConnectionsActive.Dec()
 		case event := <-h.Broadcast:
 			h.Mu.RLock()
 			msg, _ := json.Marshal(event.Message)
@@ -98,12 +101,14 @@ func (s *Server) HandleCreateRoom(w http.ResponseWriter, r *http.Request) {
 		CardSet string `json:"cardSet"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		slog.Error("Failed to decode create room request", "error", err)
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	id, err := s.Engine.CreateRoom(req.CardSet)
 	if err != nil {
+		slog.Error("Failed to create room", "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -115,13 +120,14 @@ func (s *Server) HandleWS(w http.ResponseWriter, r *http.Request) {
 	roomIdStr := r.URL.Query().Get("roomId")
 	roomId, err := uuid.Parse(roomIdStr)
 	if err != nil {
+		slog.Warn("Invalid room ID in WebSocket request", "roomId", roomIdStr)
 		http.Error(w, "invalid room id", http.StatusBadRequest)
 		return
 	}
 
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
+		slog.Error("Failed to upgrade connection to WebSocket", "error", err, "roomId", roomId)
 		return
 	}
 
@@ -136,7 +142,7 @@ func (c *Client) readPump(s *Server) {
 	defer func() {
 		if c.PlayerId != "" {
 			if name, ok := s.Engine.DisconnectPlayer(c.RoomId, c.PlayerId); ok {
-				log.Printf("Player %s disconnected from room %s", name, c.RoomId)
+				slog.Info("Player disconnected", "roomId", c.RoomId, "playerName", name)
 				s.broadcastUpdate(c.RoomId)
 			}
 		}
@@ -148,7 +154,7 @@ func (c *Client) readPump(s *Server) {
 		_, message, err := c.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseNormalClosure) {
-				log.Printf("Read error: %v", err)
+				slog.Warn("WebSocket read error", "error", err, "roomId", c.RoomId)
 			}
 			break
 		}
@@ -158,10 +164,11 @@ func (c *Client) readPump(s *Server) {
 			Payload json.RawMessage `json:"payload"`
 		}
 		if err := json.Unmarshal(message, &req); err != nil {
-			log.Printf("Unmarshal error: %v", err)
+			slog.Warn("Failed to unmarshal WS message", "error", err, "roomId", c.RoomId)
 			continue
 		}
 
+		metrics.WSMessagesReceivedTotal.WithLabelValues(req.Action).Inc()
 		s.handleAction(c, req.Action, req.Payload)
 	}
 }
@@ -175,7 +182,10 @@ func (c *Client) writePump() {
 				c.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			c.Conn.WriteMessage(websocket.TextMessage, message)
+			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
+				slog.Warn("WebSocket write error", "error", err, "roomId", c.RoomId)
+				return
+			}
 		}
 	}
 }
@@ -196,16 +206,15 @@ func (s *Server) handleAction(c *Client, action string, payload json.RawMessage)
 			Type       string    `json:"type"`
 		}
 		if err := json.Unmarshal(payload, &p); err != nil {
-			log.Printf("Join unmarshal error: %v", err)
+			slog.Warn("Join unmarshal error", "error", err, "roomId", c.RoomId)
 			return
 		}
 		player, err := s.Engine.JoinRoom(c.RoomId, p.RecoveryId, p.Name, c.Conn.RemoteAddr().String(), models.PlayerType(p.Type))
 		if err != nil || player == nil {
-			log.Printf("JoinRoom error: %v (player is nil: %v)", err, player == nil)
+			slog.Error("JoinRoom error", "error", err, "playerIsNil", player == nil, "roomId", c.RoomId)
 			return
 		}
 		c.PlayerId = player.Id
-		log.Printf("Player %s joined room %s", player.Name, c.RoomId)
 		
 		// Send success to client
 		successMsg, _ := json.Marshal(models.HubMessage{
@@ -225,28 +234,24 @@ func (s *Server) handleAction(c *Client, action string, payload json.RawMessage)
 			return
 		}
 		if err := s.Engine.Vote(c.RoomId, c.PlayerId, p.Vote); err != nil {
-			log.Printf("Vote error for %s: %v", playerName, err)
+			slog.Warn("Vote error", "playerName", playerName, "error", err, "roomId", c.RoomId)
 			return
 		}
-		log.Printf("Player %s voted in room %s", playerName, c.RoomId)
 		s.broadcastLog(c.RoomId, playerName, "Voted")
 		s.broadcastUpdate(c.RoomId)
 
 	case "unvote":
 		s.Engine.UnVote(c.RoomId, c.PlayerId)
-		log.Printf("Player %s redacted vote in room %s", playerName, c.RoomId)
 		s.broadcastLog(c.RoomId, playerName, "Redacted their vote")
 		s.broadcastUpdate(c.RoomId)
 
 	case "show":
 		s.Engine.ShowVotes(c.RoomId)
-		log.Printf("Player %s made votes visible in room %s", playerName, c.RoomId)
 		s.broadcastLog(c.RoomId, playerName, "Made all votes visible")
 		s.broadcastUpdate(c.RoomId)
 
 	case "clear":
 		s.Engine.ClearVotes(c.RoomId)
-		log.Printf("Player %s cleared votes in room %s", playerName, c.RoomId)
 		s.broadcastLog(c.RoomId, playerName, "Cleared all votes")
 		s.broadcastUpdate(c.RoomId)
 		s.Hub.Broadcast <- HubEvent{RoomId: c.RoomId, Message: models.HubMessage{Type: models.MessageTypeClear}}
@@ -258,7 +263,6 @@ func (s *Server) handleAction(c *Client, action string, payload json.RawMessage)
 		json.Unmarshal(payload, &p)
 		kickedPrivateId, err := s.Engine.KickPlayer(c.RoomId, p.PublicId)
 		if err == nil {
-			log.Printf("Player %s kicked participant %d in room %s", playerName, p.PublicId, c.RoomId)
 			s.kickClient(c.RoomId, kickedPrivateId)
 			s.broadcastUpdate(c.RoomId)
 		}
@@ -282,7 +286,6 @@ func (s *Server) handleAction(c *Client, action string, payload json.RawMessage)
 			s.Engine.UnVote(c.RoomId, c.PlayerId)
 		}
 
-		log.Printf("Player %s changed type to %s in room %s", playerName, p.Type, c.RoomId)
 		s.broadcastLog(c.RoomId, playerName, "Changed their player type to "+p.Type)
 		s.broadcastUpdate(c.RoomId)
 
@@ -297,7 +300,6 @@ func (s *Server) handleAction(c *Client, action string, payload json.RawMessage)
 	case "leave":
 		if c.PlayerId != "" {
 			if name, ok := s.Engine.LeaveRoom(c.RoomId, c.PlayerId); ok {
-				log.Printf("Player %s explicitly left room %s", name, c.RoomId)
 				s.broadcastUpdate(c.RoomId)
 				s.broadcastLog(c.RoomId, name, "Left the room")
 				c.PlayerId = "" // Prevent readPump from marking as disconnected
@@ -374,8 +376,6 @@ func (s *Server) kickClient(roomId uuid.UUID, playerId string) {
 			case client.Send <- msg:
 			default:
 			}
-			// The connection will be closed by the client or when they try to send/receive
-			// But we can also force close it here if we want, or let them handle the message.
 		}
 	}
 }
